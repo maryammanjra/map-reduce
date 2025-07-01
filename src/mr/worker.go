@@ -1,12 +1,15 @@
 package mr
 
 import (
+	"encoding/json"
 	"fmt"
 	"hash/fnv"
 	"io"
+	"json"
 	"log"
 	"net/rpc"
 	"os"
+	"strconv"
 )
 
 // Map functions return a slice of KeyValue.
@@ -27,19 +30,28 @@ func ihash(key string) int {
 func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string) string) {
 
 	// Your worker implementation here.
+	intermediateFiles := make(map[int]string)
 	taskID, filename, taskType, numReduce, err := AskForTask()
 	if err != nil {
 		// TODO: handle error better
 		log.Fatalf("Failed to get task from coordinator: %v", err)
 	}
 
-	if taskType == Map {
+	if taskType == Map { // Consider moving out map functionality and reduce functionality into different functions
 		mapInput, err := readInputFile(filename)
 		if err == nil {
 			kva := mapf(filename, mapInput)
 
 			for _, intermediate := range kva {
 				partition := ihash(intermediate.Key) % numReduce
+
+				if file, ok := intermediateFiles[partition]; ok {
+					writeKVToFile(file, intermediate)
+				} else {
+					file, err = createTempFile(partition)
+					intermediateFiles[partition] = file
+					writeKVToFile(file, intermediate)
+				}
 
 			}
 
@@ -88,8 +100,28 @@ func readInputFile(filename string) (string, error) {
 	return string(content), nil
 }
 
-func createTempFile(fileID int) {
-	file, err := os.CreateTemp("./")
+func createTempFile(fileID int) (string, error) {
+	fileNum := strconv.Itoa(fileID)
+	fileName := "temp-file" + fileNum + "-*.txt"
+	file, err := os.CreateTemp(".", fileName)
+
+	if err == nil {
+		return file.Name(), nil
+	}
+	return "", nil
+}
+
+func writeKVToFile(fileName string, kv KeyValue) error {
+	file, error := os.Open(fileName)
+	defer file.Close()
+
+	if error == nil {
+		enc := json.NewEncoder(file)
+		if err := enc.Encode(&kv); err == nil {
+			return nil
+		}
+	}
+	return error // Come back to which error to send when etc.
 }
 
 // example function to show how to make an RPC call to the coordinator.
