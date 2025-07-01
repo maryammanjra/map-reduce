@@ -25,8 +25,10 @@ type AskForTaskArgs struct {
 }
 
 type AskForTaskReply struct {
-	FileName string
-	TaskType int // Map or Reduce
+	TaskID    int
+	FileName  string
+	TaskType  int // Map or Reduce
+	NumReduce int
 }
 
 type ExampleArgs struct {

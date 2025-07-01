@@ -8,6 +8,7 @@ import (
 	"net/rpc"
 	"os"
 	"sync"
+	"time"
 )
 
 const (
@@ -78,13 +79,93 @@ func (tasks *SafeTaskMap) markInProgress(candidate int) error {
 	return fmt.Errorf("task %d already in progress", candidate)
 }
 
+func (tasks *SafeTaskMap) resetTaskStatus(candidate int) error {
+	tasks.mu.Lock()
+	defer tasks.mu.Unlock()
+
+	markTask := tasks.taskMap[candidate]
+	if markTask.status != Complete {
+		markTask.status = NotStarted
+		tasks.taskMap[candidate] = markTask
+		return nil
+	}
+	return fmt.Errorf("task %d has been completed", candidate)
+}
+
+func (tasks *SafeTaskMap) setTaskStatus(taskID int, status int) error {
+	tasks.mu.Lock()
+	defer tasks.mu.Unlock()
+	markTask, err := tasks.taskMap[taskID]
+	if !err {
+		markTask.status = status
+		tasks.taskMap[taskID] = markTask
+		return nil
+	}
+	return fmt.Errorf("task %d not found", taskID)
+}
+
+func (tasks *SafeTaskMap) checkTaskComplete(candidate int) bool {
+	tasks.mu.Lock()
+	defer tasks.mu.Unlock()
+
+	if tasks.taskMap[candidate].status == Complete { // perhaps a little sus not sure
+		return true
+	}
+	return false // also perhaps a little sus
+}
+
+func (c *Coordinator) pollTaskStatus(taskType int, taskID int) {
+	time.Sleep(time.Second * 10)
+	isComplete := c.mapTasks.checkTaskComplete(taskID)
+	if !isComplete {
+		if taskType == Map {
+			c.mapTasks.resetTaskStatus(taskID)
+		} else if taskType == Reduce {
+			c.reduceTasks.resetTaskStatus(taskID)
+		} else {
+			log.Fatalf("Unknown task type: %d", taskType)
+		}
+	}
+}
+
 func (c *Coordinator) SendTask(args *AskForTaskArgs, reply *AskForTaskReply) error {
 	assignedTask := c.mapTasks.findUnStartedTask()
-	if c.mapTasks.markInProgress(assignedTask) == nil {
+	if err := c.mapTasks.markInProgress(assignedTask); err == nil {
+		reply.TaskID = assignedTask
 		reply.FileName = c.mapTasks.taskMap[assignedTask].fileName
 		reply.TaskType = c.mapTasks.taskMap[assignedTask].taskType
+		reply.NumReduce = c.numReduceTasks
+		go c.pollTaskStatus(Map, assignedTask)
 	}
 	return nil
+}
+
+func (c *Coordinator) NotifyTaskComplete(args *NotifyTaskCompleteArgs, reply *NotifyTaskCompleteReply) error {
+	taskID := args.TaskID
+	taskType := args.TaskType
+
+	if taskType == Map {
+		c.mapTasks.mu.Lock()
+		if task, exists := c.mapTasks.taskMap[taskID]; exists && task.status == InProgress {
+			task.status = Complete
+			c.mapTasks.taskMap[taskID] = task
+			c.numRemainingMapTasks--
+		}
+		c.mapTasks.mu.Unlock()
+	} else if taskType == Reduce {
+		c.reduceTasks.mu.Lock()
+		if task, exists := c.reduceTasks.taskMap[taskID]; exists && task.status == InProgress {
+			task.status = Complete
+			c.reduceTasks.taskMap[taskID] = task
+			c.numRemainingReduceTasks--
+		}
+		c.reduceTasks.mu.Unlock()
+	} else {
+		log.Fatalf("Unknown task type: %d", taskType)
+	}
+
+	return nil
+
 }
 
 // start a thread that listens for RPCs from worker.go
