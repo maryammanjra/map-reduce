@@ -3,8 +3,10 @@ package mr
 import (
 	"fmt"
 	"hash/fnv"
+	"io"
 	"log"
 	"net/rpc"
+	"os"
 )
 
 // Map functions return a slice of KeyValue.
@@ -25,36 +27,46 @@ func ihash(key string) int {
 func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string) string) {
 
 	// Your worker implementation here.
-	filename, taskType, err := AskForTask()
+	taskID, filename, taskType, numReduce, err := AskForTask()
 	if err != nil {
 		// TODO: handle error better
 		log.Fatalf("Failed to get task from coordinator: %v", err)
 	}
 
-	log.Println("Thing: ", filename, taskType)
+	if taskType == Map {
+		mapInput, err := readInputFile(filename)
+		if err == nil {
+			kva := mapf(filename, mapInput)
 
-	// if assignedTask.taskType == Map {
-	// 	log.Println("Received Map task")
-	// } else if assignedTask.taskType == Reduce {
-	// 	log.Println("Received Reduce task")
-	// } else {
-	// 	log.Fatalf("Unknown task type: %v", assignedTask.taskType)
-	// }
+			for _, intermediate := range kva {
+				partition := ihash(intermediate.Key) % numReduce
+
+			}
+
+		}
+		log.Println("Received Map task")
+	} else if taskType == Reduce {
+		log.Println("Received Reduce task")
+	} else {
+		log.Fatalf("Unknown task type: %v", taskType)
+	}
 	// CallExample()
 
 }
 
-func AskForTask() (string, int, error) {
+func AskForTask() (int, string, int, int, error) {
 	args := AskForTaskArgs{}
 	args.X = 0 // Example argument, can be used to pass additional info if needed
 	reply := AskForTaskReply{}
 	ok := call("Coordinator.SendTask", &args, &reply)
 	if ok {
+		taskID := reply.TaskID
 		filename := reply.FileName
 		taskType := reply.TaskType
-		return filename, taskType, nil
+		numReduce := reply.NumReduce
+		return taskID, filename, taskType, numReduce, nil
 	} else {
-		return "", -1, fmt.Errorf("failed to get task from coordinator")
+		return -1, "", -1, -1, fmt.Errorf("failed to get task from coordinator")
 	}
 }
 
@@ -62,20 +74,23 @@ func AskForTask() (string, int, error) {
 // 	return nil
 // }
 
-// func readMapInputFile(filename string) (string, error) {
-// 	file, err := os.Open(filename)
-// 	if err != nil {
-// 		log.Fatalf("cannot open %v", filename)
-// 	}
-// 	content, err := ioutil.ReadAll(file)
-// 	if err != nil {
-// 		log.Fatalf("cannot read %v", filename)
-// 	}
-// 	file.Close()
-// 	kva := mapf(filename, string(content))
-// 	intermediate = append(intermediate, kva...)
-// 	return "", nil
-// }
+func readInputFile(filename string) (string, error) {
+	file, err := os.Open(filename)
+	if err != nil {
+		return "", fmt.Errorf("cannot open file %v: %v", filename, err)
+	}
+	defer file.Close()
+
+	content, err := io.ReadAll(file)
+	if err != nil {
+		return "", fmt.Errorf("cannot read file %v: %v", filename, err)
+	}
+	return string(content), nil
+}
+
+func createTempFile(fileID int) {
+	file, err := os.CreateTemp("./")
+}
 
 // example function to show how to make an RPC call to the coordinator.
 //
