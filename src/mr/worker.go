@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/rpc"
 	"os"
+	"path/filepath"
 	"strconv"
 )
 
@@ -29,8 +30,8 @@ func ihash(key string) int {
 func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string) string) {
 
 	// Your worker implementation here.
-	intermediateFiles := make(map[int]string)
-	taskID, filename, taskType, numReduce, err := AskForTask()
+
+	taskID, fileName, taskType, numReduce, err := AskForTask()
 	fmt.Printf("Working on map task with ID: %d", taskID)
 
 	if err != nil {
@@ -38,33 +39,11 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 		log.Fatalf("Failed to get task from coordinator: %v", err)
 	}
 
-	if taskType == Map { // Consider moving out map functionality and reduce functionality into different functions
-		mapInput, err := readInputFile(filename)
-		if err == nil {
-			kva := mapf(filename, mapInput)
-
-			for _, intermediate := range kva {
-				partition := ihash(intermediate.Key) % numReduce
-
-				if file, ok := intermediateFiles[partition]; ok {
-					if err := writeKVToFile(file, intermediate); err != nil {
-						log.Printf("Error writing to existing file: %v", err) // TODO: this chunk probably needs a good refactor
-					}
-				} else {
-					file, err = createTempFile(partition)
-					if err != nil {
-						log.Fatalf("Failed to initialize temp file: %v", err)
-					}
-					intermediateFiles[partition] = file
-					writeKVToFile(file, intermediate)
-					log.Println("File DNE, creating and writing")
-				}
-			}
-			if err := setAtomicNames(intermediateFiles, taskID); err != nil {
-				log.Fatalf("Error in renaming files: %v", err)
-			}
+	if taskType == Map {
+		err = performMap(fileName, mapf, numReduce, taskID)
+		if err != nil {
+			log.Fatalf("Error during map") // TODO: print error
 		}
-		log.Println("Received Map task")
 	} else if taskType == Reduce {
 		log.Println("Received Reduce task")
 	} else if taskType == Quit {
@@ -93,17 +72,48 @@ func AskForTask() (int, string, int, int, error) {
 	}
 }
 
-// func performMap(fileName string, mapf func(string, string) []KeyValue) error {
-// 	return nil
-// }
+func performMap(fileName string, mapf func(string, string) []KeyValue, numReduce int, taskID int) error {
+	mapInput, err := readInputFile(fileName)
+	intermediateFiles := make(map[int]string)
+	if err == nil {
+		kva := mapf(fileName, mapInput)
+
+		for _, intermediate := range kva {
+			partition := ihash(intermediate.Key) % numReduce
+
+			if file, ok := intermediateFiles[partition]; ok {
+				if err := writeKVToFile(file, intermediate); err != nil {
+					log.Printf("Error writing to existing file: %v", err) // TODO: this chunk probably needs a good refactor
+				}
+			} else {
+				file, err = createTempFile(partition)
+				if err != nil {
+					log.Fatalf("Failed to initialize temp file: %v", err)
+				}
+				intermediateFiles[partition] = file
+				writeKVToFile(file, intermediate)
+				log.Println("File DNE, creating and writing")
+				print(file)
+			}
+		}
+	}
+	if err := setAtomicNames(intermediateFiles, taskID); err != nil {
+		log.Fatalf("Error in renaming files: %v", err)
+	}
+	log.Println("Received Map task")
+	return nil
+}
 
 func setAtomicNames(intermediateFiles map[int]string, taskID int) error {
-	finalName := "mr-" + strconv.Itoa(taskID) + "-" // There's probs a better way to do this
+	// There's probs a better way to do this
 	for partition, file := range intermediateFiles {
-		finalName += strconv.Itoa(partition) + ".txt"
-		err := os.Rename(file, finalName)
+		dir := filepath.Dir(file)
+		finalName := "mr-" + strconv.Itoa(taskID) + "-" + strconv.Itoa(partition) + ".txt"
+		newPath := filepath.Join(dir, finalName)
+		err := os.Rename(file, newPath)
+
 		if err != nil {
-			return fmt.Errorf("Failed to atomically rename file: %v", err)
+			return fmt.Errorf("failed to atomically rename file: %v", err)
 		}
 	}
 	return nil
@@ -126,25 +136,27 @@ func readInputFile(filename string) (string, error) {
 func createTempFile(fileID int) (string, error) {
 	fileNum := strconv.Itoa(fileID)
 	fileName := "temp-file" + fileNum + "-*.txt"
-	file, err := os.CreateTemp(".", fileName)
+	file, err := os.CreateTemp("../mr", fileName)
 
 	if err == nil {
+		defer file.Close()
+		log.Println(file.Name())
 		return file.Name(), nil // add
 	}
-	return "", fmt.Errorf("Failed to create file for ID %v: %v", fileID, err)
+	return "", fmt.Errorf("failed to create file for ID %v: %v", fileID, err)
 }
 
 func writeKVToFile(fileName string, kv KeyValue) error {
-	file, err := os.OpenFile(fileName, os.O_RDWR, 0644)
+	file, err := os.OpenFile(fileName, os.O_APPEND|os.O_WRONLY, 0644)
 
 	if err != nil {
-		return fmt.Errorf("Failed to open file: %w", err)
+		return fmt.Errorf("failed to open file: %w", err)
 	}
-	defer file.Close()
 
+	defer file.Close()
 	enc := json.NewEncoder(file)
 	if err := enc.Encode(&kv); err != nil {
-		return fmt.Errorf("Failed to encode KV: %w", err)
+		return fmt.Errorf("failed to encode KV: %w", err)
 	}
 
 	return nil
