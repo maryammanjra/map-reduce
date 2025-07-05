@@ -21,20 +21,19 @@ const (
 const (
 	Map    = iota
 	Reduce = iota
+	Quit   = iota
 )
 
 type Coordinator struct {
-	numMapTasks             int
-	numReduceTasks          int
-	numRemainingMapTasks    int
-	numRemainingReduceTasks int
-	mapTasks                SafeTaskMap
-	reduceTasks             SafeTaskMap
+	mapTasks    *SafeTaskMap
+	reduceTasks *SafeTaskMap
 }
 
 type SafeTaskMap struct {
-	taskMap map[int]TaskData
-	mu      sync.Mutex
+	taskMap           map[int]*TaskData
+	numTasks          int
+	numRemainingTasks int
+	mu                sync.Mutex
 }
 
 type TaskData struct {
@@ -92,17 +91,31 @@ func (tasks *SafeTaskMap) resetTaskStatus(candidate int) error {
 	return fmt.Errorf("task %d has been completed", candidate)
 }
 
-func (tasks *SafeTaskMap) setTaskStatus(taskID int, status int) error {
+func (tasks *SafeTaskMap) markTaskComplete(taskID int) error {
 	tasks.mu.Lock()
 	defer tasks.mu.Unlock()
+
 	markTask, err := tasks.taskMap[taskID]
 	if !err {
-		markTask.status = status
+		markTask.status = Complete
 		tasks.taskMap[taskID] = markTask
+		tasks.numRemainingTasks--
 		return nil
 	}
 	return fmt.Errorf("task %d not found", taskID)
 }
+
+// func (tasks *SafeTaskMap) setTaskStatus(taskID int, status int) error {
+// 	tasks.mu.Lock()
+// 	defer tasks.mu.Unlock()
+// 	markTask, err := tasks.taskMap[taskID]
+// 	if !err {
+// 		markTask.status = status
+// 		tasks.taskMap[taskID] = markTask
+// 		return nil
+// 	}
+// 	return fmt.Errorf("task %d not found", taskID)
+// }
 
 func (tasks *SafeTaskMap) checkTaskComplete(candidate int) bool {
 	tasks.mu.Lock()
@@ -112,6 +125,31 @@ func (tasks *SafeTaskMap) checkTaskComplete(candidate int) bool {
 		return true
 	}
 	return false // also perhaps a little sus
+}
+
+func (tasks *SafeTaskMap) Init(taskType int, numTasks int, filenames []string) {
+	tasks.mu.Lock()
+	defer tasks.mu.Unlock()
+
+	tasks.taskMap = make(map[int]*TaskData)
+	tasks.numTasks = numTasks
+	tasks.numRemainingTasks = numTasks
+
+	for i := 0; i < numTasks; i++ {
+		taskData := TaskData{
+			fileName: filenames[i],
+			status:   NotStarted,
+			taskType: taskType,
+		}
+		tasks.taskMap[i] = &taskData
+	}
+}
+
+func (tasks *SafeTaskMap) allTasksComplete() bool {
+	tasks.mu.Lock()
+	defer tasks.mu.Unlock()
+
+	return tasks.numRemainingTasks == 0
 }
 
 func (c *Coordinator) pollTaskStatus(taskType int, taskID int) {
@@ -129,14 +167,47 @@ func (c *Coordinator) pollTaskStatus(taskType int, taskID int) {
 }
 
 func (c *Coordinator) SendTask(args *AskForTaskArgs, reply *AskForTaskReply) error {
-	assignedTask := c.mapTasks.findUnStartedTask()
-	if err := c.mapTasks.markInProgress(assignedTask); err == nil {
-		reply.TaskID = assignedTask
-		reply.FileName = c.mapTasks.taskMap[assignedTask].fileName
-		reply.TaskType = c.mapTasks.taskMap[assignedTask].taskType
-		reply.NumReduce = c.numReduceTasks
-		go c.pollTaskStatus(Map, assignedTask)
+
+	// First check if there are any map tasks available
+	for !c.mapTasks.allTasksComplete() {
+		assignedTask := c.mapTasks.findUnStartedTask()
+		if assignedTask == -1 {
+			time.Sleep(time.Second * 1) // No map tasks available, wait and retry
+			continue
+		}
+		if err := c.mapTasks.markInProgress(assignedTask); err == nil {
+			reply.TaskID = assignedTask
+			reply.FileName = c.mapTasks.taskMap[assignedTask].fileName
+			reply.TaskType = c.mapTasks.taskMap[assignedTask].taskType
+			reply.NumReduce = c.reduceTasks.numTasks
+			go c.pollTaskStatus(Map, assignedTask)
+			return nil
+		}
 	}
+
+	// If we reach here, it means all map tasks are complete
+	// Now we can assign reduce tasks
+	for !c.reduceTasks.allTasksComplete() {
+		assignedTask := c.reduceTasks.findUnStartedTask()
+		if assignedTask == -1 {
+			time.Sleep(time.Second * 1)
+			continue
+		}
+		if err := c.reduceTasks.markInProgress(assignedTask); err == nil {
+			reply.TaskID = assignedTask
+			reply.FileName = c.reduceTasks.taskMap[assignedTask].fileName
+			reply.TaskType = c.reduceTasks.taskMap[assignedTask].taskType
+			reply.NumReduce = c.reduceTasks.numTasks
+			go c.pollTaskStatus(Reduce, assignedTask)
+			return nil
+		}
+	}
+
+	// If we reach here, it means all tasks are complete
+	reply.TaskID = -1
+	reply.FileName = ""
+	reply.TaskType = Quit
+	reply.NumReduce = 0
 	return nil
 }
 
@@ -145,25 +216,12 @@ func (c *Coordinator) NotifyTaskComplete(args *NotifyTaskCompleteArgs, reply *No
 	taskType := args.TaskType
 
 	if taskType == Map {
-		c.mapTasks.mu.Lock()
-		if task, exists := c.mapTasks.taskMap[taskID]; exists && task.status == InProgress {
-			task.status = Complete
-			c.mapTasks.taskMap[taskID] = task
-			c.numRemainingMapTasks--
-		}
-		c.mapTasks.mu.Unlock()
+		c.mapTasks.markTaskComplete(taskID)
 	} else if taskType == Reduce {
-		c.reduceTasks.mu.Lock()
-		if task, exists := c.reduceTasks.taskMap[taskID]; exists && task.status == InProgress {
-			task.status = Complete
-			c.reduceTasks.taskMap[taskID] = task
-			c.numRemainingReduceTasks--
-		}
-		c.reduceTasks.mu.Unlock()
+		c.mapTasks.markTaskComplete(taskID)
 	} else {
 		log.Fatalf("Unknown task type: %d", taskType)
 	}
-
 	return nil
 
 }
@@ -185,7 +243,7 @@ func (c *Coordinator) server() {
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
-	if c.numRemainingMapTasks == 0 && c.numRemainingReduceTasks == 0 {
+	if c.mapTasks.numRemainingTasks == 0 && c.reduceTasks.numRemainingTasks == 0 {
 		return true
 	}
 	return false
@@ -197,42 +255,17 @@ func (c *Coordinator) Done() bool {
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{}
 
-	c.numMapTasks = len(files)
-	c.numReduceTasks = nReduce
-	c.numRemainingMapTasks = c.numMapTasks
-	c.numRemainingReduceTasks = c.numReduceTasks
+	mapTasks := new(SafeTaskMap)
+	mapTasks.Init(Map, len(files), files)
+	c.mapTasks = mapTasks
 
-	c.mapTasks.mu.Lock()
-	c.mapTasks.taskMap = make(map[int]TaskData)
-	c.mapTasks.mu.Unlock()
-
-	c.reduceTasks.mu.Lock()
-	c.reduceTasks.taskMap = make(map[int]TaskData)
-	c.reduceTasks.mu.Unlock()
-
-	// Initialize mapTasks and reduceTasks with NotStarted status.
-	for i := range c.numMapTasks {
-		log.Println("Initializing map task for file:", files[i])
-		taskData := new(TaskData)
-		taskData.fileName = files[i]
-		taskData.status = NotStarted
-		taskData.taskType = Map
-
-		c.mapTasks.mu.Lock()
-		c.mapTasks.taskMap[i] = *taskData // Not sure if this is supposed to be a pointer, check when debug
-		c.mapTasks.mu.Unlock()
+	reduceTasks := new(SafeTaskMap)
+	reduceFiles := make([]string, nReduce)
+	for i := range reduceFiles {
+		reduceFiles[i] = fmt.Sprintf("mr-out-%d", i) // TODO: Temporary file names, change later
 	}
-
-	for i := range c.numReduceTasks {
-		taskData := new(TaskData)
-		taskData.fileName = "" // change this later to M*N files
-		taskData.status = NotStarted
-		taskData.taskType = Reduce
-
-		c.reduceTasks.mu.Lock()
-		c.reduceTasks.taskMap[i] = *taskData // can delegate init to another function later if we want
-		c.reduceTasks.mu.Unlock()
-	}
+	reduceTasks.Init(Reduce, nReduce, reduceFiles)
+	c.reduceTasks = reduceTasks
 
 	c.server()
 	return &c

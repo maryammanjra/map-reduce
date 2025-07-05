@@ -31,6 +31,13 @@ type AskForTaskReply struct {
 	NumReduce int
 }
 
+type NotifyTaskCompleteArgs struct {
+	TaskID   int
+	TaskType int
+}
+
+type NotifyTaskCompleteReply struct{}
+
 type ExampleArgs struct {
 	X int
 }

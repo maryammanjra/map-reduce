@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io"
-	"json"
 	"log"
 	"net/rpc"
 	"os"
@@ -32,6 +31,8 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 	// Your worker implementation here.
 	intermediateFiles := make(map[int]string)
 	taskID, filename, taskType, numReduce, err := AskForTask()
+	fmt.Printf("Working on map task with ID: %d", taskID)
+
 	if err != nil {
 		// TODO: handle error better
 		log.Fatalf("Failed to get task from coordinator: %v", err)
@@ -46,21 +47,31 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 				partition := ihash(intermediate.Key) % numReduce
 
 				if file, ok := intermediateFiles[partition]; ok {
-					writeKVToFile(file, intermediate)
+					if err := writeKVToFile(file, intermediate); err != nil {
+						log.Printf("Error writing to existing file: %v", err) // TODO: this chunk probably needs a good refactor
+					}
 				} else {
 					file, err = createTempFile(partition)
+					if err != nil {
+						log.Fatalf("Failed to initialize temp file: %v", err)
+					}
 					intermediateFiles[partition] = file
 					writeKVToFile(file, intermediate)
+					log.Println("File DNE, creating and writing")
 				}
-
 			}
-
+			if err := setAtomicNames(intermediateFiles, taskID); err != nil {
+				log.Fatalf("Error in renaming files: %v", err)
+			}
 		}
 		log.Println("Received Map task")
 	} else if taskType == Reduce {
 		log.Println("Received Reduce task")
+	} else if taskType == Quit {
+		log.Println("Received Quit task, exiting")
+		return
 	} else {
-		log.Fatalf("Unknown task type: %v", taskType)
+		log.Fatalf("Unknown task type: %d", taskType)
 	}
 	// CallExample()
 
@@ -86,6 +97,18 @@ func AskForTask() (int, string, int, int, error) {
 // 	return nil
 // }
 
+func setAtomicNames(intermediateFiles map[int]string, taskID int) error {
+	finalName := "mr-" + strconv.Itoa(taskID) + "-" // There's probs a better way to do this
+	for partition, file := range intermediateFiles {
+		finalName += strconv.Itoa(partition) + ".txt"
+		err := os.Rename(file, finalName)
+		if err != nil {
+			return fmt.Errorf("Failed to atomically rename file: %v", err)
+		}
+	}
+	return nil
+}
+
 func readInputFile(filename string) (string, error) {
 	file, err := os.Open(filename)
 	if err != nil {
@@ -106,22 +129,25 @@ func createTempFile(fileID int) (string, error) {
 	file, err := os.CreateTemp(".", fileName)
 
 	if err == nil {
-		return file.Name(), nil
+		return file.Name(), nil // add
 	}
-	return "", nil
+	return "", fmt.Errorf("Failed to create file for ID %v: %v", fileID, err)
 }
 
 func writeKVToFile(fileName string, kv KeyValue) error {
-	file, error := os.Open(fileName)
+	file, err := os.OpenFile(fileName, os.O_RDWR, 0644)
+
+	if err != nil {
+		return fmt.Errorf("Failed to open file: %w", err)
+	}
 	defer file.Close()
 
-	if error == nil {
-		enc := json.NewEncoder(file)
-		if err := enc.Encode(&kv); err == nil {
-			return nil
-		}
+	enc := json.NewEncoder(file)
+	if err := enc.Encode(&kv); err != nil {
+		return fmt.Errorf("Failed to encode KV: %w", err)
 	}
-	return error // Come back to which error to send when etc.
+
+	return nil
 }
 
 // example function to show how to make an RPC call to the coordinator.
