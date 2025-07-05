@@ -135,7 +135,7 @@ func (tasks *SafeTaskMap) Init(taskType int, numTasks int, filenames []string) {
 	tasks.numTasks = numTasks
 	tasks.numRemainingTasks = numTasks
 
-	for i := 0; i < numTasks; i++ {
+	for i := range numTasks {
 		taskData := TaskData{
 			fileName: filenames[i],
 			status:   NotStarted,
@@ -243,7 +243,7 @@ func (c *Coordinator) server() {
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
-	if c.mapTasks.numRemainingTasks == 0 && c.reduceTasks.numRemainingTasks == 0 {
+	if c.mapTasks.allTasksComplete() && c.reduceTasks.allTasksComplete() {
 		return true
 	}
 	return false
@@ -262,7 +262,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	reduceTasks := new(SafeTaskMap)
 	reduceFiles := make([]string, nReduce)
 	for i := range reduceFiles {
-		reduceFiles[i] = fmt.Sprintf("mr-out-%d", i) // TODO: Temporary file names, change later
+		reduceFiles[i] = fmt.Sprintf("mr-\\d+-%d\\.txt", i) // TODO: Temporary file names, change later
 	}
 	reduceTasks.Init(Reduce, nReduce, reduceFiles)
 	c.reduceTasks = reduceTasks

@@ -9,7 +9,9 @@ import (
 	"net/rpc"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
+	"strings"
 )
 
 // Map functions return a slice of KeyValue.
@@ -46,6 +48,10 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 		}
 	} else if taskType == Reduce {
 		log.Println("Received Reduce task")
+		err = performReduce(fileName, reducef, taskID)
+		if err != nil {
+			log.Fatalf("Error during reduce: %v", err)
+		}
 	} else if taskType == Quit {
 		log.Println("Received Quit task, exiting")
 		return
@@ -101,6 +107,60 @@ func performMap(fileName string, mapf func(string, string) []KeyValue, numReduce
 		log.Fatalf("Error in renaming files: %v", err)
 	}
 	log.Println("Received Map task")
+	return nil
+}
+
+func performReduce(fileName string, reducef func(string, []string) string, taskID int) error {
+
+	// Read all intermediate files that match the pattern
+	entries, err := os.ReadDir("./mr")
+	re := regexp.MustCompile(fileName)
+	if err != nil {
+		log.Fatal(err)
+	}
+	kva := make([]KeyValue, 0)
+	for _, entry := range entries {
+		fmt.Println(entry.Name())
+		if re.MatchString(entry.Name()) {
+			fileContent, err := readInputFile(entry.Name())
+			if err != nil {
+				log.Fatalf("Failed to read file %s: %v", entry.Name(), err)
+			}
+			dec := json.NewDecoder(strings.NewReader(fileContent))
+			for {
+				var kv KeyValue
+				if err := dec.Decode(&kv); err != nil {
+					break
+				}
+				kva = append(kva, kv)
+			}
+		}
+	}
+
+	// Sort the key/value pairs by key.
+	reduceMap := make(map[string][]string)
+	for _, kv := range kva {
+		reduceMap[kv.Key] = append(reduceMap[kv.Key], kv.Value)
+	}
+
+	// Write reduce output to file
+	outputFileName := fmt.Sprintf("mr-out-%d.txt", taskID)
+	outputFile, err := os.OpenFile(outputFileName, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer outputFile.Close()
+
+	if err != nil {
+		log.Fatal(err) // Handle potential errors during writing
+	}
+	for key, values := range reduceMap {
+		output := reducef(key, values)
+		_, err = outputFile.WriteString(fmt.Sprintf("%s %s", key, output))
+		if err != nil {
+			log.Fatalf("Failed to write to output file: %v", err)
+		}
+	}
 	return nil
 }
 
