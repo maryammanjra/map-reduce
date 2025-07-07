@@ -35,7 +35,7 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 	// Your worker implementation here.
 	for {
 		taskID, fileName, taskType, numReduce, err := AskForTask()
-		fmt.Printf("Working on map task with ID: %d", taskID)
+		log.Println("Working on map task with ID:", taskID)
 
 		if err != nil {
 			// TODO: handle error better
@@ -47,11 +47,19 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 			if err != nil {
 				log.Fatalf("Error during map") // TODO: print error
 			}
+			err = NotifyTaskComplete(taskID, taskType)
+			if err != nil {
+				log.Fatalf("Error notifying task completion: %v", err)
+			}
 		} else if taskType == Reduce {
 			log.Println("Received Reduce task")
 			err = performReduce(fileName, reducef, taskID)
 			if err != nil {
 				log.Fatalf("Error during reduce: %v", err)
+			}
+			err = NotifyTaskComplete(taskID, taskType)
+			if err != nil {
+				log.Fatalf("Error notifying task completion: %v", err)
 			}
 		} else if taskType == Quit {
 			log.Println("Received Quit task, exiting")
@@ -62,6 +70,20 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 	}
 	// CallExample()
 
+}
+
+func NotifyTaskComplete(taskID int, taskType int) error {
+	args := NotifyTaskCompleteArgs{}
+	args.TaskID = taskID
+	args.TaskType = taskType
+	reply := NotifyTaskCompleteReply{}
+	ok := call("Coordinator.ReceiveTaskComplete", &args, &reply)
+	if ok {
+		log.Printf("Task %d of type %d completed successfully", taskID, taskType)
+		return nil
+	} else {
+		return fmt.Errorf("failed to notify coordinator of task completion: %d", taskID)
+	}
 }
 
 func AskForTask() (int, string, int, int, error) {
@@ -115,7 +137,7 @@ func performMap(fileName string, mapf func(string, string) []KeyValue, numReduce
 func performReduce(fileName string, reducef func(string, []string) string, taskID int) error {
 
 	// Read all intermediate files that match the pattern
-	entries, err := os.ReadDir("./mr")
+	entries, err := os.ReadDir("../mr")
 	re := regexp.MustCompile(fileName)
 	if err != nil {
 		log.Fatal(err)
@@ -124,7 +146,8 @@ func performReduce(fileName string, reducef func(string, []string) string, taskI
 	for _, entry := range entries {
 		fmt.Println(entry.Name())
 		if re.MatchString(entry.Name()) {
-			fileContent, err := readInputFile(entry.Name())
+			fileContent, err := readInputFile("../mr/" + entry.Name())
+			fmt.Println("Reading file: ", entry.Name())
 			if err != nil {
 				log.Fatalf("Failed to read file %s: %v", entry.Name(), err)
 			}
@@ -132,13 +155,16 @@ func performReduce(fileName string, reducef func(string, []string) string, taskI
 			for {
 				var kv KeyValue
 				if err := dec.Decode(&kv); err != nil {
+					log.Println("Error decoding JSON")
 					break
 				}
+				// fmt.Println("Decoded KeyValue: ", kv)
 				kva = append(kva, kv)
 			}
 		}
 	}
 
+	fmt.Println("Grouping key/value pairs for reduce task")
 	// Group the key/value pairs by key.
 	reduceMap := make(map[string][]string)
 	uniqueKeys := make([]string, 0)
@@ -149,9 +175,11 @@ func performReduce(fileName string, reducef func(string, []string) string, taskI
 		reduceMap[kv.Key] = append(reduceMap[kv.Key], kv.Value)
 	}
 
+	fmt.Println("Sorting keys for reduce task")
 	// Sort the key/value pairs by key.
 	slices.Sort(uniqueKeys)
 
+	fmt.Println("Writing reduce output to file")
 	// Write reduce output to file
 	outputFileName := fmt.Sprintf("mr-out-%d.txt", taskID)
 	outputFile, err := os.OpenFile(outputFileName, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
@@ -161,15 +189,16 @@ func performReduce(fileName string, reducef func(string, []string) string, taskI
 	defer outputFile.Close()
 
 	if err != nil {
-		log.Fatal(err) // Handle potential errors during writing
+		log.Fatal(err)
 	}
 	for _, key := range uniqueKeys {
 		output := reducef(key, reduceMap[key])
-		_, err = outputFile.WriteString(fmt.Sprintf("%s %s", key, output))
+		_, err = outputFile.WriteString(fmt.Sprintf("%s %s\n", key, output))
 		if err != nil {
 			log.Fatalf("Failed to write to output file: %v", err)
 		}
 	}
+	log.Println("Worker completed reduce task")
 	return nil
 }
 

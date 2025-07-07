@@ -13,7 +13,6 @@ import (
 
 const (
 	NotStarted = iota
-	Staged     = iota
 	InProgress = iota
 	Complete   = iota
 )
@@ -57,26 +56,29 @@ func (tasks *SafeTaskMap) findUnStartedTask() int {
 	defer tasks.mu.Unlock()
 	for key, value := range tasks.taskMap {
 		if value.status == NotStarted {
-			value.status = Staged
+			value.status = InProgress
 			tasks.taskMap[key] = value
+			log.Println("Task is now staged:", key)
 			return key
 		}
 	}
+	log.Println("No unstarted tasks found")
 	return -1
 }
 
-func (tasks *SafeTaskMap) markInProgress(candidate int) error {
-	tasks.mu.Lock()
-	defer tasks.mu.Unlock()
+// func (tasks *SafeTaskMap) markInProgress(candidate int) error {
+// 	tasks.mu.Lock()
+// 	defer tasks.mu.Unlock()
 
-	markTask := tasks.taskMap[candidate]
-	if markTask.status == Staged {
-		markTask.status = InProgress
-		tasks.taskMap[candidate] = markTask
-		return nil
-	}
-	return fmt.Errorf("task %d already in progress", candidate)
-}
+// 	markTask := tasks.taskMap[candidate]
+// 	if markTask.status == Staged {
+// 		markTask.status = InProgress
+// 		tasks.taskMap[candidate] = markTask
+// 		log.Printf("Task %d marked as in progress", candidate)
+// 		return nil
+// 	}
+// 	return fmt.Errorf("task %d already in progress", candidate)
+// }
 
 func (tasks *SafeTaskMap) resetTaskStatus(candidate int) error {
 	tasks.mu.Lock()
@@ -95,9 +97,14 @@ func (tasks *SafeTaskMap) markTaskComplete(taskID int) error {
 	tasks.mu.Lock()
 	defer tasks.mu.Unlock()
 
-	markTask, err := tasks.taskMap[taskID]
-	if !err {
+	markTask, ok := tasks.taskMap[taskID]
+	if ok {
+		if markTask.status == Complete {
+			log.Printf("Task %d is already marked as complete", taskID)
+			return nil
+		}
 		markTask.status = Complete
+		log.Println("Map task marked as complete")
 		tasks.taskMap[taskID] = markTask
 		tasks.numRemainingTasks--
 		return nil
@@ -120,6 +127,10 @@ func (tasks *SafeTaskMap) markTaskComplete(taskID int) error {
 func (tasks *SafeTaskMap) checkTaskComplete(candidate int) bool {
 	tasks.mu.Lock()
 	defer tasks.mu.Unlock()
+
+	if _, exists := tasks.taskMap[candidate]; !exists {
+		log.Fatalf("Task %d does not exist in task map", candidate)
+	}
 
 	if tasks.taskMap[candidate].status == Complete { // perhaps a little sus not sure
 		return true
@@ -154,7 +165,15 @@ func (tasks *SafeTaskMap) allTasksComplete() bool {
 
 func (c *Coordinator) pollTaskStatus(taskType int, taskID int) {
 	time.Sleep(time.Second * 10)
-	isComplete := c.mapTasks.checkTaskComplete(taskID)
+	log.Printf("Polling status for task %d of type %d", taskID, taskType)
+	isComplete := false
+	if taskType == Map {
+		isComplete = c.mapTasks.checkTaskComplete(taskID)
+	} else if taskType == Reduce {
+		isComplete = c.reduceTasks.checkTaskComplete(taskID)
+	} else {
+		log.Fatalf("Unknown task type: %d", taskType)
+	}
 	if !isComplete {
 		if taskType == Map {
 			c.mapTasks.resetTaskStatus(taskID)
@@ -172,10 +191,9 @@ func (c *Coordinator) SendTask(args *AskForTaskArgs, reply *AskForTaskReply) err
 	for !c.mapTasks.allTasksComplete() {
 		assignedTask := c.mapTasks.findUnStartedTask()
 		if assignedTask == -1 {
+			log.Println("No map tasks available, waiting for tasks to be available")
 			time.Sleep(time.Second * 1) // No map tasks available, wait and retry
-			continue
-		}
-		if err := c.mapTasks.markInProgress(assignedTask); err == nil {
+		} else {
 			reply.TaskID = assignedTask
 			reply.FileName = c.mapTasks.taskMap[assignedTask].fileName
 			reply.TaskType = c.mapTasks.taskMap[assignedTask].taskType
@@ -185,15 +203,15 @@ func (c *Coordinator) SendTask(args *AskForTaskArgs, reply *AskForTaskReply) err
 		}
 	}
 
+	log.Println("All maps complete")
 	// If we reach here, it means all map tasks are complete
 	// Now we can assign reduce tasks
 	for !c.reduceTasks.allTasksComplete() {
 		assignedTask := c.reduceTasks.findUnStartedTask()
 		if assignedTask == -1 {
+			log.Println("No reduce tasks available, waiting for tasks to be available")
 			time.Sleep(time.Second * 1)
-			continue
-		}
-		if err := c.reduceTasks.markInProgress(assignedTask); err == nil {
+		} else {
 			reply.TaskID = assignedTask
 			reply.FileName = c.reduceTasks.taskMap[assignedTask].fileName
 			reply.TaskType = c.reduceTasks.taskMap[assignedTask].taskType
@@ -202,6 +220,7 @@ func (c *Coordinator) SendTask(args *AskForTaskArgs, reply *AskForTaskReply) err
 			return nil
 		}
 	}
+	log.Println("All reduce tasks complete")
 
 	// If we reach here, it means all tasks are complete
 	reply.TaskID = -1
@@ -211,14 +230,16 @@ func (c *Coordinator) SendTask(args *AskForTaskArgs, reply *AskForTaskReply) err
 	return nil
 }
 
-func (c *Coordinator) NotifyTaskComplete(args *NotifyTaskCompleteArgs, reply *NotifyTaskCompleteReply) error {
+func (c *Coordinator) ReceiveTaskComplete(args *NotifyTaskCompleteArgs, reply *NotifyTaskCompleteReply) error {
 	taskID := args.TaskID
 	taskType := args.TaskType
 
 	if taskType == Map {
 		c.mapTasks.markTaskComplete(taskID)
+		log.Println("Received call for map task complete")
 	} else if taskType == Reduce {
 		c.mapTasks.markTaskComplete(taskID)
+		log.Println("Received call for reduce task complete")
 	} else {
 		log.Fatalf("Unknown task type: %d", taskType)
 	}
@@ -262,7 +283,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	reduceTasks := new(SafeTaskMap)
 	reduceFiles := make([]string, nReduce)
 	for i := range reduceFiles {
-		reduceFiles[i] = fmt.Sprintf("mr-\\d+-%d\\.txt", i) // TODO: Temporary file names, change later
+		reduceFiles[i] = fmt.Sprintf("mr-\\d+-%d\\.txt", i)
 	}
 	reduceTasks.Init(Reduce, nReduce, reduceFiles)
 	c.reduceTasks = reduceTasks
