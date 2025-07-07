@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -32,31 +33,32 @@ func ihash(key string) int {
 func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string) string) {
 
 	// Your worker implementation here.
+	for {
+		taskID, fileName, taskType, numReduce, err := AskForTask()
+		fmt.Printf("Working on map task with ID: %d", taskID)
 
-	taskID, fileName, taskType, numReduce, err := AskForTask()
-	fmt.Printf("Working on map task with ID: %d", taskID)
-
-	if err != nil {
-		// TODO: handle error better
-		log.Fatalf("Failed to get task from coordinator: %v", err)
-	}
-
-	if taskType == Map {
-		err = performMap(fileName, mapf, numReduce, taskID)
 		if err != nil {
-			log.Fatalf("Error during map") // TODO: print error
+			// TODO: handle error better
+			log.Fatalf("Failed to get task from coordinator: %v", err)
 		}
-	} else if taskType == Reduce {
-		log.Println("Received Reduce task")
-		err = performReduce(fileName, reducef, taskID)
-		if err != nil {
-			log.Fatalf("Error during reduce: %v", err)
+
+		if taskType == Map {
+			err = performMap(fileName, mapf, numReduce, taskID)
+			if err != nil {
+				log.Fatalf("Error during map") // TODO: print error
+			}
+		} else if taskType == Reduce {
+			log.Println("Received Reduce task")
+			err = performReduce(fileName, reducef, taskID)
+			if err != nil {
+				log.Fatalf("Error during reduce: %v", err)
+			}
+		} else if taskType == Quit {
+			log.Println("Received Quit task, exiting")
+			return
+		} else {
+			log.Fatalf("Unknown task type: %d", taskType)
 		}
-	} else if taskType == Quit {
-		log.Println("Received Quit task, exiting")
-		return
-	} else {
-		log.Fatalf("Unknown task type: %d", taskType)
 	}
 	// CallExample()
 
@@ -137,11 +139,18 @@ func performReduce(fileName string, reducef func(string, []string) string, taskI
 		}
 	}
 
-	// Sort the key/value pairs by key.
+	// Group the key/value pairs by key.
 	reduceMap := make(map[string][]string)
+	uniqueKeys := make([]string, 0)
 	for _, kv := range kva {
+		if _, exists := reduceMap[kv.Key]; !exists {
+			uniqueKeys = append(uniqueKeys, kv.Key)
+		}
 		reduceMap[kv.Key] = append(reduceMap[kv.Key], kv.Value)
 	}
+
+	// Sort the key/value pairs by key.
+	slices.Sort(uniqueKeys)
 
 	// Write reduce output to file
 	outputFileName := fmt.Sprintf("mr-out-%d.txt", taskID)
@@ -154,8 +163,8 @@ func performReduce(fileName string, reducef func(string, []string) string, taskI
 	if err != nil {
 		log.Fatal(err) // Handle potential errors during writing
 	}
-	for key, values := range reduceMap {
-		output := reducef(key, values)
+	for _, key := range uniqueKeys {
+		output := reducef(key, reduceMap[key])
 		_, err = outputFile.WriteString(fmt.Sprintf("%s %s", key, output))
 		if err != nil {
 			log.Fatalf("Failed to write to output file: %v", err)
@@ -252,7 +261,7 @@ func CallExample() {
 // send an RPC request to the coordinator, wait for the response.
 // usually returns true.
 // returns false if something goes wrong.
-func call(rpcname string, args interface{}, reply interface{}) bool {
+func call(rpcname string, args any, reply any) bool {
 	// c, err := rpc.DialHTTP("tcp", "127.0.0.1"+":1234")
 	sockname := coordinatorSock()
 	c, err := rpc.DialHTTP("unix", sockname)
