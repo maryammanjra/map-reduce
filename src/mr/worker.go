@@ -137,7 +137,7 @@ func performMap(fileName string, mapf func(string, string) []KeyValue, numReduce
 func performReduce(fileName string, reducef func(string, []string) string, taskID int) error {
 
 	// Read all intermediate files that match the pattern
-	entries, err := os.ReadDir("../mr")
+	entries, err := os.ReadDir(".")
 	re := regexp.MustCompile(fileName)
 	if err != nil {
 		log.Fatal(err)
@@ -146,7 +146,7 @@ func performReduce(fileName string, reducef func(string, []string) string, taskI
 	for _, entry := range entries {
 		fmt.Println(entry.Name())
 		if re.MatchString(entry.Name()) {
-			fileContent, err := readInputFile("../mr/" + entry.Name())
+			fileContent, err := readInputFile("./" + entry.Name())
 			fmt.Println("Reading file: ", entry.Name())
 			if err != nil {
 				log.Fatalf("Failed to read file %s: %v", entry.Name(), err)
@@ -181,8 +181,14 @@ func performReduce(fileName string, reducef func(string, []string) string, taskI
 
 	fmt.Println("Writing reduce output to file")
 	// Write reduce output to file
+	tempFileName, err := createTempFile(taskID)
 	outputFileName := fmt.Sprintf("mr-out-%d.txt", taskID)
-	outputFile, err := os.OpenFile(outputFileName, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Fatalf("Failed to create temp file: %v", err)
+	}
+
+	outputFile, err := os.OpenFile(tempFileName, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -198,6 +204,12 @@ func performReduce(fileName string, reducef func(string, []string) string, taskI
 			log.Fatalf("Failed to write to output file: %v", err)
 		}
 	}
+
+	err = os.Rename(tempFileName, outputFileName)
+	if err != nil {
+		log.Fatalf("Failed to rename temp file: %v", err)
+	}
+
 	log.Println("Worker completed reduce task")
 	return nil
 }
@@ -234,7 +246,7 @@ func readInputFile(filename string) (string, error) {
 func createTempFile(fileID int) (string, error) {
 	fileNum := strconv.Itoa(fileID)
 	fileName := "temp-file" + fileNum + "-*.txt"
-	file, err := os.CreateTemp("../mr", fileName)
+	file, err := os.CreateTemp(".", fileName)
 
 	if err == nil {
 		defer file.Close()

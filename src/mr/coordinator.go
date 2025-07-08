@@ -238,7 +238,7 @@ func (c *Coordinator) ReceiveTaskComplete(args *NotifyTaskCompleteArgs, reply *N
 		c.mapTasks.markTaskComplete(taskID)
 		log.Println("Received call for map task complete")
 	} else if taskType == Reduce {
-		c.mapTasks.markTaskComplete(taskID)
+		c.reduceTasks.markTaskComplete(taskID)
 		log.Println("Received call for reduce task complete")
 	} else {
 		log.Fatalf("Unknown task type: %d", taskType)
